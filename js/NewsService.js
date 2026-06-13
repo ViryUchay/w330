@@ -1,24 +1,57 @@
 // NewsService.js
-// Fetches and caches agri-sector news from News API by country keyword.
-// Exports renderNewsFeed(country) and handles sessionStorage caching logic.
+// Fetches agri-sector news via RSS feeds converted to JSON using rss2json.com.
+// Works directly from GitHub Pages (no backend / API key required).
+// Falls back to a secondary feed if the primary fails.
+// Exports renderNewsFeed(country) with sessionStorage caching.
 
-import { fetchData } from "./ExternalServices.js";
 import { alertMessage, formatDate, LoadingSpinner } from "./utils.js";
 
-const NEWS_API_KEY = "https://newsapi.org"; // Get free key at newsapi.org
-const NEWS_BASE = "https://newsapi.org/v2/everything";
+const RSS2JSON_BASE = "https://api.rss2json.com/v1/api.json?rss_url=";
 const CACHE_PREFIX = "agroyouth_news_";
+const CACHE_TTL = 1800000; // 30 minutes
 
-// Country-specific keywords for relevant agri news
-const COUNTRY_KEYWORDS = {
-  NG: "agribusiness Nigeria OR farming Nigeria OR agriculture Nigeria",
-  KE: "agribusiness Kenya OR farming Kenya OR agriculture Kenya",
-  GH: "agribusiness Ghana OR cocoa Ghana OR farming Ghana",
-  ET: "agribusiness Ethiopia OR coffee Ethiopia OR farming Ethiopia",
-  TZ: "agribusiness Tanzania OR farming Tanzania OR agriculture Tanzania",
-  UG: "agribusiness Uganda OR coffee Uganda OR farming Uganda",
-  RW: "agribusiness Rwanda OR farming Rwanda OR agriculture Rwanda",
+// Country-specific RSS feeds — primary + fallback per country
+const COUNTRY_FEEDS = {
+  NG: {
+    primary: "https://www.thisdaylive.com/index.php/category/agriculture/feed/",
+    fallback: "https://businessday.ng/category/agribusiness/feed/",
+    label: "Nigeria Agri News",
+  },
+  KE: {
+    primary: "https://www.theeastafrican.co.ke/tea/business/rss",
+    fallback: "https://nation.africa/kenya/business/rss",
+    label: "Kenya Agri News",
+  },
+  GH: {
+    primary: "https://www.ghanaweb.com/GhanaHomePage/business/agric.php?rss=1",
+    fallback: "https://www.myjoyonline.com/category/business/feed/",
+    label: "Ghana Agri News",
+  },
+  ET: {
+    primary: "https://www.thereporterethiopia.com/category/business/feed/",
+    fallback: "https://addisstandard.com/category/news/economy/feed/",
+    label: "Ethiopia Agri News",
+  },
+  TZ: {
+    primary: "https://www.thecitizen.co.tz/tanzania/business/rss",
+    fallback: "https://dailynews.co.tz/rss.xml",
+    label: "Tanzania Agri News",
+  },
+  UG: {
+    primary: "https://www.monitor.co.ug/uganda/business/rss",
+    fallback: "https://www.newvision.co.ug/rss",
+    label: "Uganda Agri News",
+  },
+  RW: {
+    primary: "https://www.newtimes.co.rw/section/business/rss",
+    fallback: "https://www.ktpress.rw/category/business/feed/",
+    label: "Rwanda Agri News",
+  },
 };
+
+// Universal agri fallback — always works, broad African agriculture coverage
+const UNIVERSAL_FALLBACK =
+  "https://www.fao.org/news/rss-feed/en/";
 
 /**
  * Fetches and renders agri-sector news for the selected country.
@@ -32,7 +65,7 @@ export async function renderNewsFeed(country) {
   spinner.show();
 
   try {
-    const articles = await getNewsArticles(country.code);
+    const articles = await getNewsArticles(country.code, country.name);
     spinner.hide();
 
     if (!articles.length) {
@@ -54,7 +87,7 @@ export async function renderNewsFeed(country) {
   }
 }
 
-async function getNewsArticles(countryCode) {
+async function getNewsArticles(countryCode, countryName) {
   const cacheKey = `${CACHE_PREFIX}${countryCode}`;
 
   // Check sessionStorage cache
@@ -62,40 +95,100 @@ async function getNewsArticles(countryCode) {
     const cached = sessionStorage.getItem(cacheKey);
     if (cached) {
       const { articles, timestamp } = JSON.parse(cached);
-      // Cache valid for 30 minutes
-      if (Date.now() - timestamp < 1800000) return articles;
+      if (Date.now() - timestamp < CACHE_TTL) return articles;
     }
   } catch {}
 
-  const keyword = encodeURIComponent(COUNTRY_KEYWORDS[countryCode] || `agribusiness ${countryCode}`);
-  const url = `${NEWS_BASE}?q=${keyword}&language=en&sortBy=publishedAt&pageSize=9&apiKey=${NEWS_API_KEY}`;
+  const feedConfig = COUNTRY_FEEDS[countryCode];
+  let articles = [];
 
-  const data = await fetchData(url);
-  const articles = (data.articles || []).filter(
-    (a) => a.title && a.title !== "[Removed]"
-  );
+  // Try primary feed
+  if (feedConfig?.primary) {
+    articles = await fetchRSSFeed(feedConfig.primary);
+  }
+
+  // Try country fallback feed
+  if (!articles.length && feedConfig?.fallback) {
+    articles = await fetchRSSFeed(feedConfig.fallback);
+  }
+
+  // Try universal FAO fallback
+  if (!articles.length) {
+    articles = await fetchRSSFeed(UNIVERSAL_FALLBACK);
+  }
+
+  // Normalise and filter
+  articles = articles
+    .filter((a) => a.title && a.title.trim().length > 5)
+    .slice(0, 9);
 
   // Cache results
   try {
-    sessionStorage.setItem(cacheKey, JSON.stringify({ articles, timestamp: Date.now() }));
+    sessionStorage.setItem(
+      cacheKey,
+      JSON.stringify({ articles, timestamp: Date.now() })
+    );
   } catch {}
 
   return articles;
 }
 
+/**
+ * Fetches a single RSS feed via rss2json and returns normalised article objects.
+ * Returns [] on any error so callers can try the next feed.
+ * @param {string} rssUrl
+ * @returns {Promise<Array>}
+ */
+async function fetchRSSFeed(rssUrl) {
+  try {
+    const apiUrl = `${RSS2JSON_BASE}${encodeURIComponent(rssUrl)}&count=9`;
+    const response = await fetch(apiUrl);
+    if (!response.ok) return [];
+
+    const data = await response.json();
+    if (data.status !== "ok" || !Array.isArray(data.items)) return [];
+
+    return data.items.map((item) => ({
+      title: item.title || "",
+      url: item.link || "#",
+      description: item.description
+        ? stripHtml(item.description).slice(0, 120)
+        : "",
+      publishedAt: item.pubDate || "",
+      urlToImage: item.thumbnail || item.enclosure?.link || "",
+      source: { name: data.feed?.title || "News" },
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Strips HTML tags from a string for safe plain-text display.
+ * @param {string} html
+ * @returns {string}
+ */
+function stripHtml(html) {
+  return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function buildNewsCard(article) {
-  const date = formatDate(article.publishedAt);
+  const date = article.publishedAt ? formatDate(article.publishedAt) : "";
   const thumb = article.urlToImage
     ? `<img src="${article.urlToImage}" alt="" class="news-card__image" loading="lazy" onerror="this.style.display='none'" />`
     : `<div class="news-card__image-placeholder" aria-hidden="true">📰</div>`;
 
+  // Sanitise title for aria-label
+  const safeTitle = article.title.replace(/"/g, "&quot;");
+
   return `
-    <a href="${article.url}" target="_blank" rel="noopener noreferrer" class="news-card" aria-label="${article.title}">
+    <a href="${article.url}" target="_blank" rel="noopener noreferrer"
+       class="news-card" aria-label="${safeTitle}">
       <div class="news-card__thumb">${thumb}</div>
       <div class="news-card__body">
-        <p class="news-card__source">${article.source?.name || "News"} · ${date}</p>
+        <p class="news-card__source">${article.source?.name || "News"}${date ? ` · ${date}` : ""}</p>
         <h4 class="news-card__title">${article.title}</h4>
-        ${article.description ? `<p class="news-card__desc">${article.description.slice(0, 100)}…</p>` : ""}
+        ${article.description ? `<p class="news-card__desc">${article.description}…</p>` : ""}
       </div>
     </a>
   `;
