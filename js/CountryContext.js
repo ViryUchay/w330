@@ -5,6 +5,7 @@ import { fetchData } from "./ExternalServices.js";
 import { alertMessage, LoadingSpinner } from "./utils.js";
 
 const REST_COUNTRIES_BASE = "https://restcountries.com/v3.1/alpha/";
+const REST_COUNTRIES_V5 = "https://restcountries.com/v5/alpha/";
 const CACHE_PREFIX = "agroyouth_country_";
 
 /**
@@ -36,26 +37,43 @@ async function getCountryData(code) {
   try {
     const cached = sessionStorage.getItem(cacheKey);
     if (cached) return JSON.parse(cached);
-  } catch {}
+  } catch { }
 
-  const data = await fetchData(`${REST_COUNTRIES_BASE}${code}`);
-  const country = Array.isArray(data) ? data[0] : data;
+  // Try v5 first, fall back to v3.1
+  let country;
+  try {
+    const data = await fetchData(`${REST_COUNTRIES_V5}${code}`);
+    country = Array.isArray(data) ? data[0] : data;
+  } catch {
+    const data = await fetchData(`${REST_COUNTRIES_BASE}${code}`);
+    country = Array.isArray(data) ? data[0] : data;
+  }
+
+  // v5 uses name.official/common same as v3.1 but flags may differ
+  const flagUrl =
+    country.flags?.svg ||
+    country.flags?.png ||
+    country.flag?.svg ||
+    country.flag?.png ||
+    "";
 
   const result = {
-    name: country.name?.common || code,
-    officialName: country.name?.official || code,
-    capital: country.capital?.[0] || "N/A",
+    name: country.name?.common || country.name || code,
+    officialName: country.name?.official || country.name?.common || code,
+    capital: Array.isArray(country.capital)
+      ? country.capital[0]
+      : country.capital || "N/A",
     population: country.population || 0,
     region: country.subregion || country.region || "Africa",
-    flagSvg: country.flags?.svg || country.flags?.png || "",
-    flagAlt: country.flags?.alt || `Flag of ${country.name?.common}`,
+    flagSvg: flagUrl,
+    flagAlt: country.flags?.alt || `Flag of ${country.name?.common || code}`,
     currencies: country.currencies || {},
     languages: Object.values(country.languages || {}).slice(0, 3),
   };
 
   try {
     sessionStorage.setItem(cacheKey, JSON.stringify(result));
-  } catch {}
+  } catch { }
 
   return result;
 }
